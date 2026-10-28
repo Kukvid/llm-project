@@ -27,9 +27,13 @@ Part -SUPPLIED_BY-> Supplier
 ErrorCode -INDICATES-> Component
 ErrorCode -FIXED_BY-> Procedure
 
+Поле subject — источник стрелки слева, поле object — цель стрелки справа.
 Не добавляй факты, которых нет в тексте. Пример: из фразы «Модель AR-210 входит в
 линейку Арктика» извлеки Model AR-210, ProductLine Арктика и связь
-AR-210 -BELONGS_TO-> Арктика. Верни только JSON по переданной схеме.
+{"subject_type":"Model","subject":"AR-210","type":"BELONGS_TO",
+"object_type":"ProductLine","object":"Арктика"}. Для фразы «деталь P-1010 — компрессор»
+связь IS_A имеет subject Part P-1010 и object Component компрессор, а не наоборот.
+Верни только JSON по переданной схеме.
 """
 
 
@@ -89,8 +93,25 @@ def extract_chunk(chunk: Chunk, llm: LLMClient) -> ExtractionResult:
         {"role": "user", "content": chunk.text},
     ]
     parsed = None
-    for _ in range(2):
-        response = llm.chat(messages, json_schema=EXTRACTION_SCHEMA)
+    for attempt in range(2):
+        attempt_messages = messages
+        if attempt:
+            attempt_messages = [
+                *messages,
+                {
+                    "role": "user",
+                    "content": (
+                        "Предыдущий ответ был обрезан или не прошёл проверку. Сформируй валидный JSON заново. "
+                        "В каждой связи subject — источник стрелки, object — её цель. Для IS_A источником всегда "
+                        "служит Part, а целью Component."
+                    ),
+                },
+            ]
+        response = llm.chat(
+            attempt_messages,
+            json_schema=EXTRACTION_SCHEMA,
+            max_tokens=1024 if attempt == 0 else 2048,
+        )
         try:
             parsed = _parse_response(response.content)
             break
