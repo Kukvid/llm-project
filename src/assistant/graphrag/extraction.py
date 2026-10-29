@@ -28,11 +28,18 @@ ErrorCode -INDICATES-> Component
 ErrorCode -FIXED_BY-> Procedure
 
 Поле subject — источник стрелки слева, поле object — цель стрелки справа.
+HAS_PART всегда связывает Model с конкретной Part: subject — модель, object — номер детали.
+Если в руководстве перечислены узлы модели в виде «название узла — деталь P-...», создай для
+каждой строки две связи: Model -HAS_PART-> Part и Part -IS_A-> Component. Никогда не создавай
+Model -HAS_PART-> Component.
 Не добавляй факты, которых нет в тексте. Пример: из фразы «Модель AR-210 входит в
 линейку Арктика» извлеки Model AR-210, ProductLine Арктика и связь
 {"subject_type":"Model","subject":"AR-210","type":"BELONGS_TO",
 "object_type":"ProductLine","object":"Арктика"}. Для фразы «деталь P-1010 — компрессор»
 связь IS_A имеет subject Part P-1010 и object Component компрессор, а не наоборот.
+Из фразы «В AR-210 установлен компрессор — деталь P-1010» дополнительно извлеки связь
+{"subject_type":"Model","subject":"AR-210","type":"HAS_PART",
+"object_type":"Part","object":"P-1010"}.
 Верни только JSON по переданной схеме.
 """
 
@@ -103,7 +110,8 @@ def extract_chunk(chunk: Chunk, llm: LLMClient) -> ExtractionResult:
                     "content": (
                         "Предыдущий ответ был обрезан или не прошёл проверку. Сформируй валидный JSON заново. "
                         "В каждой связи subject — источник стрелки, object — её цель. Для IS_A источником всегда "
-                        "служит Part, а целью Component."
+                        "служит Part, а целью Component. Для HAS_PART источником всегда служит Model, а целью "
+                        "конкретная Part с номером детали, не Component."
                     ),
                 },
             ]
