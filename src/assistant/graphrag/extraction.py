@@ -3,7 +3,7 @@
 import json
 
 from assistant.infra.config import vocabulary
-from assistant.infra.grounding import CODE_TYPES, canonical_name, find_codes
+from assistant.infra.grounding import CODE_TYPES, canonical_name, find_codes, find_names, normalize_code
 from assistant.infra.llm import LLMClient
 from assistant.infra.schemas import (
     ENTITY_TYPES,
@@ -81,9 +81,32 @@ def _canonical_entity(
     codes_in_chunk: set[str],
 ) -> Entity | None:
     name = canonical_name(entity_type, raw_name, names)
-    if name is None or (entity_type in CODE_TYPES and name not in codes_in_chunk):
+    if name is None:
+        return None
+    if entity_type in CODE_TYPES and name not in codes_in_chunk:
         return None
     return Entity(entity_type, name)
+
+
+def _grounded_relations(
+    chunk: Chunk, names: dict[str, list[str]], codes_in_chunk: set[str]
+) -> dict[str, Relation]:
+    """Возвращает однозначные связи из служебных формулировок корпуса."""
+    grounded: dict[str, Relation] = {}
+    lowered = chunk.text.casefold()
+    models = [code for code in codes_in_chunk if code.startswith(("AR-", "BZ-", "GS-"))]
+
+    _, marker, failure_text = lowered.partition("отказ узла")
+    if marker and len(models) == 1:
+        sentence = failure_text.split(".", 1)[0]
+        components = [name for kind, name in find_names(sentence, names) if kind == "Component"]
+        if len(components) == 1:
+            grounded["FAILED"] = Relation(Entity("Model", models[0]), "FAILED", Entity("Component", components[0]))
+
+    parts = [code for code in find_codes(chunk.text) if code.startswith("P-")]
+    if "снят" in lowered and "вместо неё устанавливается" in lowered and len(parts) == 2:
+        grounded["REPLACED_BY"] = Relation(Entity("Part", parts[0]), "REPLACED_BY", Entity("Part", parts[1]))
+    return grounded
 
 
 def extract_chunk(chunk: Chunk, llm: LLMClient) -> ExtractionResult:
@@ -131,6 +154,14 @@ def extract_chunk(chunk: Chunk, llm: LLMClient) -> ExtractionResult:
     raw_entities, raw_relations = parsed
     names = vocabulary()
     codes_in_chunk = set(find_codes(chunk.text))
+    names_in_chunk = set(find_names(chunk.text, names))
+    grounded_relations = _grounded_relations(chunk, names, codes_in_chunk)
+    grounded_replacement_requested = any(
+        item["type"] == "REPLACED_BY"
+        and normalize_code(item["subject"]) in codes_in_chunk
+        and normalize_code(item["object"]) in codes_in_chunk
+        for item in raw_relations
+    )
     entities: dict[str, Entity] = {}
     relations: dict[tuple[str, str, str], Relation] = {}
     dropped = 0
@@ -152,9 +183,23 @@ def extract_chunk(chunk: Chunk, llm: LLMClient) -> ExtractionResult:
         if not relation.matches_schema():
             dropped += 1
             continue
+        if relation.type == "BELONGS_TO" and (relation.object.type, relation.object.name) not in names_in_chunk:
+            dropped += 1
+            continue
+        grounded = grounded_relations.get(relation.type)
+        if relation.type in {"FAILED", "REPLACED_BY"} and relation != grounded:
+            dropped += 1
+            continue
         entities[subject.node_id] = subject
         entities[object_.node_id] = object_
         relations[(subject.node_id, relation.type, object_.node_id)] = relation
+
+    for relation in grounded_relations.values():
+        if relation.type == "REPLACED_BY" and not grounded_replacement_requested:
+            continue
+        entities[relation.subject.node_id] = relation.subject
+        entities[relation.object.node_id] = relation.object
+        relations[(relation.subject.node_id, relation.type, relation.object.node_id)] = relation
 
     return ExtractionResult(
         chunk.chunk_id,
