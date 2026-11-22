@@ -11,8 +11,14 @@ from assistant.infra.llm import LLMClient, ToolCall, tool_message
 from assistant.infra.schemas import AgentResult, ToolStep
 
 REFUSAL = "В базе знаний не найдено."
+_NUMBER = r"\d{1,3}(?:[ \u00a0\u202f]\d{3})+|\d+"
 _WITH_UNIT = re.compile(
-    r"(?<![\w-])(\d{1,3}(?:[ \u00a0\u202f]\d{3})+|\d+)\s*(?:руб(?:\.|ля|лей)?|₽|шт(?:\.|ук(?:а|и)?)?)",
+    rf"(?<![\w-])(?P<number>{_NUMBER})\s*(?:руб(?:\.|ля|лей)?|₽|шт(?:\.|ук(?:а|и)?)?)",
+    re.IGNORECASE,
+)
+_AFTER_VALUE_LABEL = re.compile(
+    rf"(?:цен[аыеу]|стоимост[ьи]|стоит|остат(?:ок|ке)|доступн\w*|в наличии|на складе)"
+    rf"[^\d.!?]{{0,24}}(?<![\w-])(?P<number>{_NUMBER})(?![\w-])",
     re.IGNORECASE,
 )
 
@@ -57,13 +63,17 @@ def _grounded_numbers(results: list[dict]) -> set[str]:
     return numbers
 
 
-def _grounding_errors(answer: str, allowed_codes: set[str], results: list[dict]) -> list[str]:
+def _claimed_numbers(text: str) -> set[str]:
+    matches = [*_WITH_UNIT.finditer(text), *_AFTER_VALUE_LABEL.finditer(text)]
+    return {re.sub(r"\D", "", match.group("number")) for match in matches}
+
+
+def _grounding_errors(answer: str, allowed_codes: set[str], results: list[dict], question: str) -> list[str]:
     errors = [code for code in find_codes(answer) if code not in allowed_codes]
-    allowed_numbers = _grounded_numbers(results)
-    for match in _WITH_UNIT.finditer(answer):
-        number = re.sub(r"\D", "", match.group(1))
+    allowed_numbers = _grounded_numbers(results) | _claimed_numbers(question)
+    for number in _claimed_numbers(answer):
         if number not in allowed_numbers:
-            errors.append(match.group(0))
+            errors.append(number)
     return errors
 
 
@@ -125,7 +135,7 @@ def run_agent(
             if not answer:
                 return AgentResult(REFUSAL, steps, sorted(sources), refused=True)
 
-            errors = _grounding_errors(answer, allowed_codes, results)
+            errors = _grounding_errors(answer, allowed_codes, results, question)
             if errors:
                 messages.extend(
                     [
@@ -141,7 +151,7 @@ def run_agent(
                 )
                 corrected = llm.chat(messages)
                 answer = corrected.content.strip()
-                if corrected.tool_calls or not answer or _grounding_errors(answer, allowed_codes, results):
+                if corrected.tool_calls or not answer or _grounding_errors(answer, allowed_codes, results, question):
                     return AgentResult(REFUSAL, steps, sorted(sources), refused=True)
 
             refused = knowledge_refused or missing_data or REFUSAL.lower() in answer.lower()
